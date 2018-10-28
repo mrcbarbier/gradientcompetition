@@ -126,7 +126,13 @@ def generate_prm(S=50,Krange=(80,120),Trange=(20,30),symm=1,gfull=(0,300),arange
     Kmax=np.random.uniform(*Krange,size=S)
     lopt=np.random.uniform(*gfull,size=S)
     tol=np.random.uniform(*Trange,size=S)
-    return {'alpha':alpha,'Kmax':Kmax, 'lopt':lopt,'tol':tol }
+    data={'alpha':alpha,'Kmax':Kmax, 'lopt':lopt,'tol':tol }
+    mode=kwargs.pop('mode',None)
+    if mode == 'alpha':
+        data['alpha2'] = a = generate_prm(S=S, mean=.5, wid=.5, symm=symm, gfull=gfull, **kwargs)['alpha']
+        data['phase'] = np.random.random(a.shape)
+        data['freq'] = np.random.uniform(0.1,1,size= a.shape)
+    return data
 
 def make_point_measure(data,measure,**kwargs):
     """Measures at one point of the gradient"""
@@ -160,7 +166,6 @@ def make_point_measure(data,measure,**kwargs):
 def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(100,200),init=2,reverse=0,**kwargs):
     import scipy.integrate as scint
     interactions,Kmax,lopt, tol = [data[z] for z in ('alpha','Kmax','lopt','tol')]
-    np.fill_diagonal(interactions, 0)
     gradient = np.linspace(grange[0],grange[1], length + 1)
     S=Kmax.shape[0]
     selfint=np.ones(S)
@@ -171,11 +176,13 @@ def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(
     measure={}
     transfer_measures=[]
     if mode!='alpha':
+        """If interactions don't change, do not repeat measure of eigenvalues of full matrix"""
         transfer_measures.append('eigdom_full')
     for l in gradient:
         print l
         measure = {x:measure.get(x,None) for x in transfer_measures }
         capa = np.ones(tol.shape) * Kmax
+        alpha=interactions
         if mode == 'K':
             capa = Kmax * np.exp(-(l - lopt) ** 2 / (2 * tol) ** 2)
             measure['K'] = capa
@@ -183,7 +190,9 @@ def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(
             x0 = Kmax * np.exp(-(l - lopt) ** 2 / (2 * tol) ** 2)
             measure['x0'] = x0
         elif mode=='alpha':
-            alpha=interactions+(data['alpha2']-interactions)*(l-np.min(gradient))/(np.max(gradient)-np.min(gradient))
+            phase,freq=data['phase'],data['freq']
+            lrel=(l*1.-np.min(gradient))/(np.max(gradient)-np.min(gradient))
+            alpha=interactions+(data['alpha2']-interactions)*np.cos(np.pi*(phase+freq*lrel))**2
             measure['alpha'] = alpha
 
         if hasattr(init,'__iter__'):
@@ -194,7 +203,6 @@ def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(
             x0 = result+ np.random.uniform(0,1,S)
         else:
             x0 = np.random.uniform(0,1,S) * np.max(Kmax)/(1+capa) + 2
-        alpha=interactions
 
         capa = np.clip(capa, 10 ** -9, None)
         locdata={}
@@ -204,7 +212,7 @@ def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(
         locdata['community'] = -alpha
 
         def derivative(t, x):
-            res = x * (capa - np.dot(interactions, x) - x * selfint)
+            res = x * (capa - np.dot(alpha, x) - x * selfint)
             res[x < 10 ** -10] = np.clip(res[x < 10 ** -10], 0, None)
             return res
         integrator = scint.ode(derivative).set_integrator('lsoda', rtol=10. ** -13,nsteps=5000000)  # ,min_step=10**-50)
@@ -230,11 +238,16 @@ def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(
 
 
 def make_measures(df,measure,**kwargs):
-    #Uniformity tests
-    # live = df['alive'].values[np.argsort(df['position'].values )]
+    '''Measure over a whole gradient (contained in df)'''
     df = df.sort_values('position')
+    live=df['alive'].values
     Ns = [np.array(n) for n in df['Nf']]
-    live=[np.where(n>0)[0] for n in Ns]
+    S=Ns[0].shape[0]
+    Nlive=[np.array(n[a]) for n,a in zip(Ns,live) ]
+    Nlive=[n for a in Nlive for n in a]
+    # live=[np.where(n>0)[0] for n in Ns]
+    measure.update({'N':np.mean(Ns),'Nstd':np.std(Ns), 'alive':np.mean([1.*len(a)/S for a in df['alive']]) ,'S':S,
+                    'Nlive':np.mean(Nlive), 'Nlivestd':np.std(Nlive) })
     jacs = [1 - len(set(a1).intersection(a2)) * 1. / len(set(a1).union(a2)) for a1, a2 in zip(live[:-1], live[1:])]
     jacs=np.array(jacs)
     dNs = [la.norm( (n1-n2)/(10**-15+n1+n2)) for n1, n2 in zip(Ns[:-1], Ns[1:])]
@@ -247,7 +260,7 @@ def make_measures(df,measure,**kwargs):
         K/=np.mean(Krand)
         measure['uniform']=K
     measure['dNs']=dNs
-    measure['uniform']=np.std(dNs)/np.mean(dNs)
+    measure['uniform']=np.std(dNs)/np.mean(dNs+10**-15)
     rank=np.argsort(np.argsort(dNs))
     measure['Gini']=np.sum( ( 2*rank - len(dNs)-1)*dNs )/len(dNs)/np.sum(dNs)
 
@@ -275,34 +288,6 @@ def make_measures(df,measure,**kwargs):
         measure['hysteresis']=0
     return measure
 
-def local_plots(df,measure,fpath='',**kwargs):
-    path=Path(fpath)
-    profiles=[np.array(list(df['Nf'].values)).T]
-    if 'reverse_Nf' in df:
-        profiles.append(np.array(list(df['reverse_Nf'].values)).T)
-    ii=0
-    plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize'])*(len(profiles),1))
-    for profile in profiles:
-        ii+=1
-        if len(profiles)>1:
-            plt.subplot(1,len(profiles),ii)
-        for y in profile:
-            x=df['position']
-            x,y=np.sort(x),y[np.argsort(x)]
-            plt.plot(x,y)
-            plt.fill_between(x, y, 0,alpha=.1)
-    # plt.show()
-    plt.savefig(path+'profile.png')
-    plt.close()
-    S=len(profiles[0])
-    vec=np.random.random(S)
-    for profile in profiles:
-        x = df['position']
-        y=np.dot(vec,profile)
-        x, y = np.sort(x), y[np.argsort(x)]
-        plt.plot(x,y)
-    plt.savefig(path+'CSI.png')
-    plt.close()
 
 def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),triangle='',
          systems=(0,),keep_sys=1, #Replicas
@@ -310,9 +295,7 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
     path=Path(path)
     datarefs={}
     def make_data():
-        dataref = generate_prm(S=S, mean=.5, wid=.5, symm=symm,gfull=gfull,**kwargs)
-        if mode=='alpha':
-            dataref['alpha2']=generate_prm(S=S, mean=.5, wid=.5, symm=symm,gfull=gfull,**kwargs)['alpha']
+        dataref = generate_prm(S=S, mean=.5, wid=.5, symm=symm,gfull=gfull,mode=mode,**kwargs)
         return dataref
     for sys in systems:
         datarefs[sys]=make_data()
@@ -329,7 +312,7 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
         for x in range(resolution):#[::-1]:
             for y in range( x+1):
                 mn, wid = vals[x], vals[y]
-                if wid > 1 - mn + 10 ** -6 or triangle == 'rectangle':
+                if wid > 1 - mn + 10 ** -6 and not triangle == 'rectangle':
                     continue
                 if not rerun and not remeasure and not df is None and True in [np.allclose([mn, wid,sys], z) for z in
                                                                                df[['mean', 'wid','sys']].values]:
@@ -343,7 +326,7 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
                     if 'alpha' in i:
                         mat=data[i]
                         mat=mn+wid*(mat-.5)
-                        np.fill_diagonal(mat,1)
+                        np.fill_diagonal(mat,0)
                         data[i]=mat
                 dpath=path+Path('mn_{}-wd_{}-sys_{}'.format(mn,wid,sys) )
                 dpath.mkdir()
@@ -378,23 +361,57 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
                     df=pd.DataFrame([ measure ])
     df.to_json(path+'measures.csv')
 
+
+
+
+def local_plots(df,measure,fpath='',**kwargs):
+    path=Path(fpath)
+    profiles=[np.array(list(df['Nf'].values)).T]
+    if 'reverse_Nf' in df:
+        profiles.append(np.array(list(df['reverse_Nf'].values)).T)
+        hyster=1
+    else:
+        hyster=0
+    ii=0
+    plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize'])*(len(profiles)+hyster,1))
+    S = len(profiles[0])
+    vec=np.random.random(S)
+    for profile in profiles:
+        ii+=1
+        if len(profiles)>1:
+            plt.subplot(1,len(profiles)+hyster,ii)
+        pos = df['position']
+        for y in profile:
+            x,y=np.sort(pos),y[np.argsort(pos)]
+            plt.plot(x,y)
+            plt.fill_between(x, y, 0,alpha=.1)
+        if hyster:
+            plt.subplot(1,len(profiles)+1,len(profiles)+1)
+            y=np.dot(vec,profile)
+            x, y = np.sort(pos), y[np.argsort(pos)]
+            plt.plot(x,y)
+    if kwargs.get('save',1):
+        plt.savefig(path + 'profile.png')
+        plt.close()
+
+
 def detailed_plots( path,**kwargs):
     print 'Detailed plot',Path(path)+'measures.csv'
     df=pd.read_json(Path(path)+'measures.csv')
     if 'filter' in kwargs:
         df = df.query(kwargs['filter'])
     df=df.sort_values('path')
+    figs=[]
     for idx,measure in df.iterrows():
         dpath=measure['path']
         print '  ...Plotting',dpath
         tdf=pd.read_json(Path(dpath)+'traj.csv')
-        local_plots(tdf, measure, fpath=dpath)
-
+        figs.append(local_plots(tdf, measure, fpath=dpath,**kwargs))
+    return figs
 
 def show(path='gradcomp',detailed=0,hold=0,**kwargs):
     """Summary plots"""
-    if detailed:
-        detailed_plots(path,**kwargs)
+
     import seaborn as sns
     sns.set(style="white")
     path=Path(path)
@@ -407,19 +424,30 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
     df['hysteresis>1']=[float(x>1.) for x in df['hysteresis']]
     df['eigdom_full>0']=[float(x>0) for x in df['eigdom_full_max']]
     df['eigdom_max']=np.clip(df['eigdom_max'],-1,None)
-    df['eigdom_J_max']=np.clip(df['eigdom_J_max'],-2,None)
+    df['eigdom_J_max']=np.clip(df['eigdom_J_max'],-.05,None)
+    df['alone']=[1.*(a*len(n)<2) for a,n in df[['alive','dNs']].values  ]
+    for N in ('N','Nlive'):
+        df[N+'relstd']=df[N+'std']/df[N]
     axes=['mean','wid']
-    vals=['Vpositive','Vcascade','Vstd','Vdiagmin',#'Vdiagmax','Vdiagstd',
-          'meanJ','stdJ',#'relstdJ',#'J=1',
-          'uniform','Gini',
-          'eigdom_max','eigdom', 'eigdom_J_max','eigdom_full_max',  'eigdom_full>0',
-          # 'eqdist',
-          'hysteresis','hysteresis>1']
+    mode=kwargs.get('mode','dft')
+    if mode =='full':
+        vals=['Vpositive','Vcascade','Vstd','Vdiagmin',#'Vdiagmax','Vdiagstd',
+              'meanJ','stdJ',#'relstdJ',#'J=1',
+              'uniform','Gini',
+              'eigdom_max','eigdom', 'eigdom_J_max','eigdom_full_max',  'eigdom_full>0',
+              # 'eqdist',
+              'alone','Nliverelstd',#'Nrelstd',
+              'hysteresis']
+    else:
+        vals=['alone','hysteresis','Vstd','stdJ','eigdom_full>0']
     vals=[v for v in vals if v in df.keys()]
     showdf=df[axes+vals].groupby(axes).mean().reset_index()
     for val in vals:
         plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize'])*(1,.5)),plt.title(val)
-        sns.heatmap(showdf.pivot(columns='mean', index='wid', values=val),cmap='PuRd')
+        if 'eigdom_max' in val:
+            sns.heatmap(showdf.pivot(columns='mean', index='wid', values=val),vmax=0, cmap='PuRd')
+        else:
+            sns.heatmap(showdf.pivot(columns='mean', index='wid', values=val),cmap='PuRd')
         plt.gca().invert_yaxis()
 
     plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize']) * (1.5, .5)), plt.title(val)
@@ -435,7 +463,15 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
 
     if not hold:
         plt.show()
+    for ip, p in enumerate(points):
+        mw=df[['mean','wid']].values
+        closest=mw[np.argmin([la.norm(v-p) for v in mw] )]
+        detailed_plots(path, filter='mean=={} & wid=={} & sys==1'.format(closest[0],closest[1]),save=0 )
+    if not hold:
+        plt.show()
         code_debugger()
+
+
 
 if __name__=='__main__':
     #NOTES:
@@ -453,12 +489,12 @@ if __name__=='__main__':
 
     # SETS OF OPTIONS FOR DIFFERENT SIMULATION RUNS
     runs={'default':{},
-          'A':{'mode':'A'}, #Change interactions rather than carrying capacities
+          'alpha':{'mode':'alpha'}, #Change interactions rather than carrying capacities
           'rectangle':{'triangle':'rectangle'}, #Explore half rectangle
-          'nokeep':{'keep_sys':0}  # Generate new properties at every point in the triangle
+          'nokeep':{'keep_sys':0, 'systems':range(5)}  # Generate new properties at every point in the triangle
           }
     for symm in [-1,0,1]:
-        runs['sym{}'.format(symm) ]={'symm':symm,'resolution':41}
+        runs['sym{}'.format(symm) ]={'symm':symm,'resolution':41,'systems':range(5)}
 
     run =None
     for i in sys.argv:
@@ -467,10 +503,25 @@ if __name__=='__main__':
     if run is None:
         run='sym1' #Change this to switch between different runs (put 'default' for default optons)
 
-    options={}
-    options.update(default)
-    options.update(runs[run])
-    path='gradcomp_'+mode
-    if not 'show' in sys.argv:
-        loop(path=path, rerun='rerun' in sys.argv, remeasure='measure' in sys.argv,**options)
-    show(path,detailed=1,filter='mean==.5 & wid==.5')
+    def do(run,with_plots=1):
+        options={}
+        options.update(default)
+        if '+' in run:
+            for r in run.split('+'):
+                options.update(runs[r] )
+        else:
+            options.update(runs[run])
+        path='gradcomp_'+run
+        if not 'show' in sys.argv:
+            loop(path=path, rerun='rerun' in sys.argv, remeasure='measure' in sys.argv,**options)
+        if not 'show' in sys.argv or 'detailed' in sys.argv:
+            detailed_plots(path, save=1)#,filter='mean==.5 & wid==.5')
+        if with_plots:
+            setfigpath(Path(path) )  # Path for saving figures
+            show(path,mode='full')
+
+    if 'multirun' in sys.argv:
+        for run in ['alpha','rectangle','sym0','sym-1']:
+            do(run,with_plots=0)
+    else:
+        do(run)
