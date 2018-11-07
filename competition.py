@@ -6,9 +6,93 @@ from copy import deepcopy
 
 
 ## UTILITIES
+from numpy import sqrt,pi,exp,log,sin,cos
+from scipy.special import erf,binom
+
+#==================== BASICS ============================
+
+
+
+def erfmom(mom,mean,var,lim=0):
+    #lim = lower integration limit
+    if lim!=0:
+        if mom ==0:
+            return erfmom(mom,mean-lim,var)
+        moms=[erfmom(m,mean-lim,var)*lim**(mom-m)*binom(mom,m) for m in range(mom+1)]
+        return np.sum(moms)
+    if var<=0.001:
+        var=0.001
+    xx=mean/sqrt(2*var)
+    mom0=.5 * (erf(xx)+1 )
+    mom1=sqrt(var/2/pi) * exp(-xx**2)
+    if mom==0:
+        return mom0
+    elif mom==1:
+        return mean* mom0 + mom1
+    elif mom==2:
+        return (var+mean**2)*mom0 + mean*mom1
+
+def bunin_solve(size=100,mu=1,sigma=1,sigma_k=1,gamma=1,x0=None,print_msg=1,**kwargs):
+    import scipy.optimize as sopt
+    NTRIALS=kwargs.get('NTRIALS',200)
+    avgK=kwargs.get('avgK',1)
+    rowstd=kwargs.get('rowstd',0)
+    if x0 is None:
+        x0=np.random.random(4)
+
+    def eqs(vec):
+        q,v,h,phi=vec
+        u = (1 - mu * 1. / size) / sigma
+        utilde=np.clip(u-gamma*v,0,None)
+        avgN=1./(sigma*h + mu) * avgK
+        sigma_lambda=np.sqrt(sigma_k**2 + rowstd**2 * avgN**2 )/sigma/avgN
+        effvar=q+sigma_lambda**2
+        correctionKA= size*(kwargs.get('corrKA',0))/sigma**2/avgN
+        if correctionKA and not np.isnan(correctionKA) :
+            effvar -=correctionKA #*2
+            #print 'correction',correctionKA
+        eq4=phi - v*utilde
+        mean=h/utilde
+        var=effvar/utilde**2
+        eq1=phi-erfmom(0,mean,var)
+        eq2=1-erfmom(1,mean,var)
+        eq3=q-erfmom(2,mean,var)
+        res= np.array( (eq1,eq2,eq3,eq4))
+
+        zerocond=min(q,phi,h+mu/sigma ) #Things that should be positive!
+        if zerocond<0:
+            res+=np.abs(zerocond )*np.sign(res)
+        print res,mean,var
+        print '      ' ,mu,u, sigma, sigma_k
+        return res
+    #root=sopt.newton_krylov
+    #root=sopt.anderson
+    root=sopt.root
+    res= root(eqs,x0)
+    q,v,h,phi= res.x
+    avgN=1./(sigma*h + mu)* avgK
+    if not res.success or np.max(np.abs(eqs((q,v,h,phi))))>10.**-4:
+        trials=kwargs.pop('trials_left',NTRIALS)
+        if trials>0:
+            print 'trials',trials,x0
+            return bunin_solve(size=size,mu=mu,sigma=sigma,
+                sigma_k=sigma_k,gamma=gamma,x0=None ,
+                trials_left =trials-1,**kwargs)
+        if print_msg:
+            print 'ERROR: {} {}'.format(res.message,res.fun)
+            print 'PARAMS: S {} mu {} sigma {} sigma_K {} gamma {}'.format(size,mu,sigma,sigma_k,gamma)
+            print 'VALS: q {} v {} h {} phi {} avgN {}'.format(q,v,h,phi,avgN)
+        q=v=h=phi=0
+    return q,v,h,phi
+
 
 def offdiag(x):
     return x[np.eye(x.shape[0])==0]
+
+def ifelse(x,a,b):
+    if x:
+        return a
+    return b
 
 def rotmat(S):
     Nmi=np.random.random(S)
@@ -106,7 +190,11 @@ def generate_prm(S=50,Krange=(80,120),Trange=(20,30),symm=1,gfull=(0,300),arange
     # Distribution uniforme de la tolerance entre 15 et 30
     assert mean>0
     wid=min([wid,arange[1]-mean,mean-arange[0]])
-    vals=np.sort(np.random.uniform( mean-wid,mean+wid ,S*(S-1)/2 ))
+    if kwargs.get('distribution','normal'):
+        sd=wid/np.sqrt(3)
+        vals = np.sort(np.random.normal(mean,sd, S * (S - 1) / 2))
+    else:
+        vals=np.sort(np.random.uniform( mean-wid,mean+wid ,S*(S-1)/2 ))
     mn=len(vals)/2.
     ref=np.arange(0,len(vals) ).astype('float')
     partners=np.random.permutation(ref)
@@ -137,9 +225,11 @@ def generate_prm(S=50,Krange=(80,120),Trange=(20,30),symm=1,gfull=(0,300),arange
 def make_point_measure(data,measure,**kwargs):
     """Measures at one point of the gradient"""
     N=measure['Nf']
+    S=len(N)
     Aij=data['community']
     D=data['selfint']
     g=data['growth']
+    K=g/D
     death=1#kwargs.get('death',10**-6)
     alive=np.where(N>death)[0]
     Slive=len(alive)
@@ -155,13 +245,34 @@ def make_point_measure(data,measure,**kwargs):
         Press=np.zeros(B.shape)
 
     measure['W']= g+ np.dot(Aij-np.diag(D),N)
-    measure['eigdom_J']=np.max(np.real(la.eigvals(J)))/np.mean(Nlive)
+    eigJ=np.max(np.real(la.eigvals(J)))
+    measure['eigdom_J']=eigJ
+    measure['eigdom_Jscaled']=eigJ/np.mean(Nlive)
     measure['eigdom']=np.max(np.real(la.eigvals(B)))
+    Bfull=Aij-np.diag(D)
     if measure.get( 'eigdom_full',None) is None:
-        measure['eigdom_full']=np.max(np.real(la.eigvals(Aij-np.diag(D))))
+        measure['eigdom_full']=np.max(np.real(la.eigvals(Bfull)))
+    if measure.get( 'eigdom_fullT',None) is None:
+        measure['eigdom_fullT']=np.max(np.real(la.eigvals(Bfull+Bfull.T)))
+
     measure['alive']=alive
+    measure['%alive']=len(alive)*1./S
     measure['Press']=Press
     measure['eqdist']=eqdist=la.norm(np.dot(B,Nlive)+glive)/Slive
+    meanA, stdA = np.mean(offdiag(Aij)), np.std(offdiag(Aij))
+    measure['mu'],measure['sigma']= -S*meanA,np.sqrt(S)*stdA
+    measure['meanK'],measure['stdK']=np.mean(K),np.std(K)
+
+    #MEAN FIELD PREDICTIONS
+    def MF(K):
+        S=len(K)
+        avgNMF=np.mean(K)/(1+(S-1) *meanA)
+        NMF=K - meanA*avgNMF*S
+        if np.min(NMF)<0:
+            return MF(K[NMF>0])
+        return avgNMF, NMF, S
+    measure['MF_avgN'],measure['MF_N'],measure['MF_Slive']=MF(K)
+
 
 def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(100,200),init=2,reverse=0,**kwargs):
     import scipy.integrate as scint
@@ -177,7 +288,7 @@ def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(
     transfer_measures=[]
     if mode!='alpha':
         """If interactions don't change, do not repeat measure of eigenvalues of full matrix"""
-        transfer_measures.append('eigdom_full')
+        transfer_measures+=['eigdom_full','eigdom_fullT']
     for l in gradient:
         print l
         measure = {x:measure.get(x,None) for x in transfer_measures }
@@ -230,6 +341,7 @@ def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(
         result[result <= death] = 0
         measure['position'] = l
         measure['Nf']=result
+        measure['dNdt']= derivative(0,result)
         make_point_measure(locdata,measure,death=death,**kwargs)
 
         table.append(measure)
@@ -246,10 +358,11 @@ def make_measures(df,measure,**kwargs):
     Nlive=[np.array(n[a]) for n,a in zip(Ns,live) ]
     Nlive=[n for a in Nlive for n in a]
     # live=[np.where(n>0)[0] for n in Ns]
-    measure.update({'N':np.mean(Ns),'Nstd':np.std(Ns), 'alive':np.mean([1.*len(a)/S for a in df['alive']]) ,'S':S,
+    measure.update({'N':np.mean(Ns),'Nstd':np.std(Ns), 'alive':np.mean([1.*len(a)/S for a in live]) ,'S':S,
                     'Nlive':np.mean(Nlive), 'Nlivestd':np.std(Nlive) })
     jacs = [1 - len(set(a1).intersection(a2)) * 1. / len(set(a1).union(a2)) for a1, a2 in zip(live[:-1], live[1:])]
-    jacs=np.array(jacs)
+    jacs = [len(set(a1).union(a2)) - len(set(a1).intersection(a2))  for a1, a2 in zip(live[:-1], live[1:])]
+    jacs=np.array(jacs)*1./np.mean([len(a) for a in live])
     dNs = [la.norm( (n1-n2)/(10**-15+n1+n2)) for n1, n2 in zip(Ns[:-1], Ns[1:])]
     if 0:
         changes=[ pos for pos, a1, a2 in zip(df['position'].values[:-1], live[:-1], live[1:]) for i in set(a1).symmetric_difference(a2)]
@@ -260,32 +373,88 @@ def make_measures(df,measure,**kwargs):
         K/=np.mean(Krand)
         measure['uniform']=K
     measure['dNs']=dNs
-    measure['uniform']=np.std(dNs)/np.mean(dNs+10**-15)
+    measure['uniform']=np.std(dNs)/np.mean(np.array(dNs)+10**-15)
     rank=np.argsort(np.argsort(dNs))
     measure['Gini']=np.sum( ( 2*rank - len(dNs)-1)*dNs )/len(dNs)/np.sum(dNs)
 
-    Vpos=np.mean([np.mean(offdiag(np.array(x))>0) for x in df['Press'].values  ] )
-    Vstd=np.mean([np.std(offdiag(np.array(x))) for x in df['Press'].values  ] )
+    Vpos=np.mean([np.mean(offdiag(np.array(x))>0) if len(x)>1 else 0 for x in df['Press'].values  ] )
+    Vstd=np.mean([np.std(offdiag(np.array(x))) if len(x)>1 else 0 for x in df['Press'].values   ] )
+    Vmax=np.mean([np.max(offdiag(np.array(x))) if len(x)>1 else 0 for x in df['Press'].values   ] )
     Vdiagmin=np.min([np.min(np.diag(np.array(x))) for x in df['Press'].values  ] )
     Vdiagmax=np.max([np.max(np.diag(np.array(x))) for x in df['Press'].values  ] )
     Vdiagstd=np.mean([np.std(np.diag(np.array(x))) for x in df['Press'].values  ] )
-    if np.isnan(Vpos):
-        Vpos,Vstd=0,0
     # measure['Vcascade']= np.mean([np.max( np.max(x*y[a],axis=1)/y[a]) for row in df[['Press','Nf','alive']].values for x,y,a in ([np.array(z) for z in row],) ] )
     measure['Vcascade']= np.mean([np.max( np.max( (x-np.diag(np.diag(x))) *y[a])/np.max(y[a])) for row in df[['Press','Nf','alive']].values for x,y,a in ([np.array(z) for z in row],) ] )
     # code_debugger()
 
-    for v in ('eigdom','eigdom_full','eigdom_J'):
+
+    #BUNIN PREDICTION OF TRANSITION
+    sigma=np.sqrt(S)*measure['wid']/np.sqrt(3)
+    u=(1-measure['mean'])
+    V=np.mean([np.mean(np.diag(np.array(x))) for x in df['Press'].values  ] )
+    gamma=measure['sym']
+    measure['v']=V
+    if 'MF_Slive' in df and 0:
+        meanK = df['meanK'].mean()
+        if sigma>10**-5:
+            sigma=df['sigma'].mean()
+            q,v,h,phi= bunin_solve(size=S,mu=df['mu'].mean(),sigma=sigma,sigma_k=df['stdK'].mean()/meanK,gamma=1)
+            v/=sigma
+            avgN = meanK / (sigma * h + df['mu'].mean())
+            avgN2 = q * avgN ** 2
+            print np.mean(Ns),np.mean(np.array(Ns)**2),avgN,avgN2, sigma, measure['wid']/np.sqrt(3)
+            code_debugger()
+        else:
+            v,phi=1./np.sqrt(u ),df['MF_Slive'].mean()/S
+    else:
+        phi=measure['alive']
+        v=2/(u +np.sqrt(u**2-4*gamma*sigma**2*phi) )
+    measure['v_from_phi']=v#
+    def safelog(x):
+        if x>0:
+            return np.log10(x)
+        return np.nan
+    # measure['bunin']=safelog(chi )  #np.abs( sigma**2 - 1./phi*(1-1.*measure['mean'])**2/(1+gamma)**2 )- np.abs(sigma**2)
+    measure['bunin'] = (1./v**2 - phi*sigma**2 )
+    # code_debugger()
+    phiobs=measure['alive']
+    chi2=(u-phiobs*gamma*V*sigma**2)**2 - phiobs*sigma**2
+    measure['bunincomp']=(1./V**2 - phiobs*sigma**2 )#safelog(chi2)
+    measure['bunincomp2']=chi2
+
+    for v in ('eigdom','eigdom_full','eigdom_fullT','eigdom_Jscaled'):
+        if not v in df.keys():
+            continue
         measure[v]=df[v].mean(skipna=1)
         measure[v+'_max']=df[v].max(skipna=1)
 
-    measure.update( {'eqdist':df['eqdist'].max(), 'Jaccard':jacs,'Vpositive':Vpos,'Vstd': Vstd,'Vdiagmax':Vdiagmax,'Vdiagmin':Vdiagmin,'Vdiagstd':Vdiagstd })
+    measure.update( {'eqdist':df['eqdist'].max(), 'Jaccard':jacs,'Vpositive':Vpos,'Vstd': Vstd,'Vmax':Vmax,'Vdiagmax':Vdiagmax,'Vdiagmin':Vdiagmin,'Vdiagstd':Vdiagstd })
     if 'reverse_Nf' in df:
         x1,x2=df['Nf'],df['reverse_Nf']
         x1,x2=np.array(list(x1.values)),np.array(list(x2.values))
         measure['hysteresis']=np.sum( 2*np.abs(x1-x2 )/ (x1+x2+1)  )
     else:
         measure['hysteresis']=0
+
+    if 0:
+        measure['eqrate']=  np.max([np.max(np.abs(np.array(d)/n))/l for d,l,n in zip(df['dNdt'].values,df['eigdom_J'].values,Ns) ])
+
+    #Feasibility cone (Grilli et al 2015)
+    m,s,gamma=measure['mean'],measure['wid']/np.sqrt(3),measure['sym']
+    denom=1+(S-2)*(m**2+s**2)
+    avgcoseta=2*m + S*m**2
+    stdcoseta=np.sqrt(np.clip(2*(1+gamma)*s**2 + S*(m**2 + s**2)**2 - S*m**4,0,None))
+    avgcoseta,stdcoseta=avgcoseta/denom,stdcoseta/denom+10**-5
+    from scipy.special import erf
+    measure['negarc']=(erf( (avgcoseta-1)/np.sqrt(2)/stdcoseta )+1) /2 # np.exp(-(avgcoseta-denom)**2/(2*stdcoseta**2) )/np.sqrt(2*pi*stdcoseta**2/denom**2)
+    from numpy import pi
+    d=-1
+    xie=S*(2*(pi-1)*m**2 + pi * s**2) - d*(2*(pi-2) *m +pi  )
+    xi1=pi * m*(2*d-m*S)*(2*d*m+d - S*(2*m**2+s**2) )
+    xi2=np.sqrt(pi) *m *(m*S-2*d)
+    measure['xi']=xi1/xie**2 * np.log( 1-erf(xi2/xie) )  + np.log(1+ (3*S*s**2*(1+gamma))/(2*pi) )
+    beta=S*(2*m + (S-2)*m**2) / (1 + (S-1)*m**2)
+    measure['xi_simple']=np.log(np.clip(1-beta/S/pi,10**-15,None))
     return measure
 
 
@@ -332,7 +501,12 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
                 dpath.mkdir()
                 tdf=None
                 fname=dpath+'traj.csv'
-                measure={'path':dpath, 'mean':mn,'wid':wid,'sys':sys}
+                al=data['alpha']
+                gamma=np.corrcoef(offdiag(al),offdiag(al.T))[0,1]
+                if np.isnan(gamma):
+                    gamma=0
+                measure={'path':dpath, 'mean':mn,'wid':wid,'sym':gamma,
+                         'sys':sys,'rectangle':triangle=='rectangle'}
                 if not rerun:
                     try:
                         tdf=pd.read_json(fname)
@@ -351,6 +525,9 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
                         tdf['reverse_Nf']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
                     else:
                         tdf=make_run(data,mode=mode,ext_measure=measure,**kwargs)
+                    tdf['mean']=mn
+                    tdf['wid']=wid
+                    tdf['sys']=sys
                     tdf.to_json(fname)
 
                 # measure.update(m.export_params())
@@ -423,11 +600,29 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
     df['hysteresis']=np.clip(np.log10(10**-10+df['hysteresis']),-1,None)
     df['hysteresis>1']=[float(x>1.) for x in df['hysteresis']]
     df['eigdom_full>0']=[float(x>0) for x in df['eigdom_full_max']]
+    try:
+        df['negdef']=[float(x>0) for x in df['eigdom_fullT_max']]
+    except:
+        print 'Old results, do not have negative definiteness'
+    df['stable']=[float(x>0) for x in df['eigdom_full_max']]
     df['eigdom_max']=np.clip(df['eigdom_max'],-1,None)
-    df['eigdom_J_max']=np.clip(df['eigdom_J_max'],-.05,None)
+    df['eigdom_max~0']=np.clip([10*float(float(a)>-0.1) for a  in df['eigdom_max'].values ],0,None)
     df['alone']=[1.*(a*len(n)<2) for a,n in df[['alive','dNs']].values  ]
     for N in ('N','Nlive'):
         df[N+'relstd']=df[N+'std']/df[N]
+    try:
+        df['vcomp']=df['v']/df['v_from_phi']-1
+        df['eigdom_Jscaled_max'] = np.clip(df['eigdom_Jscaled_max'], -.05, None)
+    except:
+        pass
+    for key in df:
+        if 'V' in key:# or 'bunin' in key:
+            df[key]=np.clip(df[key],0,5)
+        # if 'bunin' in key:
+            # df[key]=1./(1+df[key])
+    # code_debugger()
+    df['stdJlive']=df['stdJ']*df['alive']
+    df['Vcascade']=np.clip(df['Vcascade'],0,0.5)
     axes=['mean','wid']
     mode=kwargs.get('mode','dft')
     if mode =='full':
@@ -435,17 +630,21 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
               'meanJ','stdJ',#'relstdJ',#'J=1',
               'uniform','Gini',
               'eigdom_max','eigdom', 'eigdom_J_max','eigdom_full_max',  'eigdom_full>0',
+              'negdef', 'negarc',
               # 'eqdist',
               'alone','Nliverelstd',#'Nrelstd',
+              'bunin','bunin2','bunincomp',
               'hysteresis']
     else:
-        vals=['alone','hysteresis','Vstd','stdJ','eigdom_full>0']
+        vals=['bunin','bunincomp','bunincomp2','Vcascade','Vstd','hysteresis','stdJ']#'Vstd','Vcascade', 'stdJ','negdef','stable','Vpositive','eigdom_max']
     vals=[v for v in vals if v in df.keys()]
     showdf=df[axes+vals].groupby(axes).mean().reset_index()
+    rectangle=showdf['wid'].max()>.5
     for val in vals:
-        plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize'])*(1,.5)),plt.title(val)
-        if 'eigdom_max' in val:
-            sns.heatmap(showdf.pivot(columns='mean', index='wid', values=val),vmax=0, cmap='PuRd')
+        plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize'])*(1,(1+rectangle)*.5)),plt.title(val)
+        if np.min(showdf[val])<0 and np.max(showdf[val])>0:
+            vmax=np.max(np.abs(showdf[val]))
+            sns.heatmap(showdf.pivot(columns='mean', index='wid', values=val),vmax=vmax,vmin=-vmax, cmap='seismic_r')
         else:
             sns.heatmap(showdf.pivot(columns='mean', index='wid', values=val),cmap='PuRd')
         plt.gca().invert_yaxis()
@@ -453,6 +652,8 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
     plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize']) * (1.5, .5)), plt.title(val)
     points=[(.1,.1), (.5,.25),(0.5,0.5),(.9,.1) ]
     points=[(0,0), (.5,.25),(0.5,0.5),(1,0) ]
+    if rectangle:
+        points+=[(.85,.6),(1,1)]
     for ip,p in enumerate(points):
         plt.subplot(1,len(points),ip+1)
         mw=df[['mean','wid']].values
@@ -463,10 +664,12 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
 
     if not hold:
         plt.show()
+        code_debugger()
     for ip, p in enumerate(points):
         mw=df[['mean','wid']].values
         closest=mw[np.argmin([la.norm(v-p) for v in mw] )]
-        detailed_plots(path, filter='mean=={} & wid=={} & sys==1'.format(closest[0],closest[1]),save=0 )
+        detailed_plots(path, filter='mean=={} & wid=={} & sys==0'.format(closest[0],closest[1]),save=0 )
+        plt.title('Mn {} Wd{}'.format(*closest))
     if not hold:
         plt.show()
         code_debugger()
@@ -489,16 +692,17 @@ if __name__=='__main__':
 
     # SETS OF OPTIONS FOR DIFFERENT SIMULATION RUNS
     runs={'default':{},
-          'alpha':{'mode':'alpha'}, #Change interactions rather than carrying capacities
+          'alpha':{'mode':'alpha','triangle':'rectangle'}, #Change interactions rather than carrying capacities
           'rectangle':{'triangle':'rectangle'}, #Explore half rectangle
-          'nokeep':{'keep_sys':0, 'systems':range(5)}  # Generate new properties at every point in the triangle
+          'nokeep':{'keep_sys':0, 'systems':range(5)},  # Generate new properties at every point in the triangle
+          'gauss':{'distribution':'normal'},
           }
     for symm in [-1,0,1]:
         runs['sym{}'.format(symm) ]={'symm':symm,'resolution':41,'systems':range(5)}
 
     run =None
     for i in sys.argv:
-        if i in runs:
+        if i in runs or '+' in i:
             run=i
     if run is None:
         run='sym1' #Change this to switch between different runs (put 'default' for default optons)
@@ -511,14 +715,14 @@ if __name__=='__main__':
                 options.update(runs[r] )
         else:
             options.update(runs[run])
-        path='gradcomp_'+run
+        path='gradcomp_'+run.replace('+','_')
         if not 'show' in sys.argv:
             loop(path=path, rerun='rerun' in sys.argv, remeasure='measure' in sys.argv,**options)
-        if not 'show' in sys.argv or 'detailed' in sys.argv:
+        if 'detailed' in sys.argv:
             detailed_plots(path, save=1)#,filter='mean==.5 & wid==.5')
         if with_plots:
-            setfigpath(Path(path) )  # Path for saving figures
-            show(path,mode='full')
+            setfigpath(Path(path)+''.join([i for i in sys.argv if '/' in i]) )  # Path for saving figures
+            show(path,mode=ifelse('full' in sys.argv,'full', 'dft'))
 
     if 'multirun' in sys.argv:
         for run in ['alpha','rectangle','sym0','sym-1']:
