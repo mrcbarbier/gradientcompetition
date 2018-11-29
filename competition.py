@@ -257,9 +257,10 @@ def make_point_measure(data,measure,**kwargs):
         measure['eigdom_fullT']=np.max(np.real(la.eigvals(Bfull+Bfull.T)))
     if measure.get('feasible', None) is None:
         try:
-            measure['feasible']=np.mean(np.dot(-la.inv(Aij-np.diag(D)),np.ones(S)*(1+np.random.normal(0,0.01,S)) )>=0)
+            measure['feasible1%']=np.mean(np.dot(-la.inv(Aij-np.diag(D)),np.ones(S)*(1+np.random.normal(0,0.01,S)) )>=0)
+            measure['feasible5%']=np.mean(np.dot(-la.inv(Aij-np.diag(D)),np.ones(S)*(1+np.random.normal(0,0.01,S)) )>=0)
         except:
-            measure['feasible']=0
+            measure['feasible1%']=measure['feasible5%']=0
 
     measure['alive']=alive
     measure['%alive']=len(alive)*1./S
@@ -294,7 +295,7 @@ def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(
     transfer_measures=[]
     if mode!='alpha':
         """If interactions don't change, do not repeat measure of eigenvalues of full matrix"""
-        transfer_measures+=['eigdom_full','eigdom_fullT','feasible']
+        transfer_measures+=['eigdom_full','eigdom_fullT','feasible1%','feasible5%']
     for l in gradient:
         print l
         measure = {x:measure.get(x,None) for x in transfer_measures }
@@ -382,7 +383,7 @@ def make_measures(df,measure,**kwargs):
     measure['uniform']=np.std(dNs)/np.mean(np.array(dNs)+10**-15)
     rank=np.argsort(np.argsort(dNs))
     measure['Gini']=np.sum( ( 2*rank - len(dNs)-1)*dNs )/len(dNs)/np.sum(dNs)
-    measure['feasible']=np.mean(df['feasible'])
+    measure['feasible']=np.mean(df['feasible5%'])
     measure['stable']=np.mean(df['eigdom_full']<0)
     measure['Gleason']=measure['feasible'] * measure['stable']
 
