@@ -255,6 +255,11 @@ def make_point_measure(data,measure,**kwargs):
         measure['eigdom_full']=np.max(np.real(la.eigvals(Bfull)))
     if measure.get( 'eigdom_fullT',None) is None:
         measure['eigdom_fullT']=np.max(np.real(la.eigvals(Bfull+Bfull.T)))
+    if measure.get('feasible', None) is None:
+        try:
+            measure['feasible']=np.mean(np.dot(-la.inv(Aij-np.diag(D)),np.ones(S)*(1+np.random.normal(0,0.01,S)) )>=0)
+        except:
+            measure['feasible']=0
 
     measure['alive']=alive
     measure['%alive']=len(alive)*1./S
@@ -289,7 +294,7 @@ def make_run(data,tmax=2000,tsample=100,death=10**-6,mode='K',length=10,grange=(
     transfer_measures=[]
     if mode!='alpha':
         """If interactions don't change, do not repeat measure of eigenvalues of full matrix"""
-        transfer_measures+=['eigdom_full','eigdom_fullT']
+        transfer_measures+=['eigdom_full','eigdom_fullT','feasible']
     for l in gradient:
         print l
         measure = {x:measure.get(x,None) for x in transfer_measures }
@@ -377,6 +382,9 @@ def make_measures(df,measure,**kwargs):
     measure['uniform']=np.std(dNs)/np.mean(np.array(dNs)+10**-15)
     rank=np.argsort(np.argsort(dNs))
     measure['Gini']=np.sum( ( 2*rank - len(dNs)-1)*dNs )/len(dNs)/np.sum(dNs)
+    measure['feasible']=np.mean(df['feasible'])
+    measure['stable']=np.mean(df['eigdom_full']<0)
+    measure['Gleason']=measure['feasible'] * measure['stable']
 
     Vpos=np.mean([np.mean(offdiag(np.array(x))>0) if len(x)>1 else 0 for x in df['Press'].values  ] )
     Vstd=np.mean([np.std(offdiag(np.array(x))) if len(x)>1 else 0 for x in df['Press'].values   ] )
@@ -445,7 +453,7 @@ def make_measures(df,measure,**kwargs):
         pass
 
     try:
-        measure['Gleason']=np.mean([np.sum((np.array(N)>1)*1.*(np.array(K)>1))/np.sum(np.array(K)>1) for N,K in df[['Nf','capa']].values ])
+        measure['GleasonNK']=np.mean([np.sum((np.array(N)>1)*1.*(np.array(K)>1))/np.sum(np.array(K)>1) for N,K in df[['Nf','capa']].values ])
     except:
         pass
 
@@ -525,12 +533,20 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
                 if tdf is None:
                     if remeasure:
                         continue
-                    if kwargs.get('init',None)=='hysteresis':
+                    init=kwargs.get('init',None)
+                    if init =='hysteresis':
                         kw={}
                         kw.update(kwargs)
                         kw['init']='follow'
                         tdf=make_run(data,mode=mode,ext_measure=measure,**kw)
                         # kw['init']=tdf['Nf'].values[-1]+ np.random.uniform(0,1,S)
+                        tdf2=make_run(data,mode=mode,ext_measure=measure,reverse=1,**kw)
+                        tdf['reverse_Nf']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
+                    elif  init =='tworandom':
+                        kw={}
+                        kw.update(kwargs)
+                        kw['init']='random'
+                        tdf=make_run(data,mode=mode,ext_measure=measure,**kw)
                         tdf2=make_run(data,mode=mode,ext_measure=measure,reverse=1,**kw)
                         tdf['reverse_Nf']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
                     else:
@@ -617,7 +633,7 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
         df['negdef']=[float(x>0) for x in df['eigdom_fullT_max']]
     except:
         print 'Old results, do not have negative definiteness'
-    df['stable']=[float(x>0) for x in df['eigdom_full_max']]
+    # df['stable']=[float(x<0) for x in df['eigdom_full_max']]
     df['eigdom_max']=np.clip(df['eigdom_max'],-1,None)
     df['eigdom_max~0']=np.clip([10*float(float(a)>-0.1) for a  in df['eigdom_max'].values ],0,None)
     df['alone']=[1.*(a*len(n)<2) for a,n in df[['alive','dNs']].values  ]
@@ -653,7 +669,7 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
               'bunin','bunincomp','bunincomp2',
               'hysteresis']
     else:
-        vals=['bunincomp','Vpositive','hysteresis','stdJ','Gleason','negarc']#'Vstd','Vcascade', 'stdJ','negdef','stable','Vpositive','eigdom_max']
+        vals=['bunincomp','Vpositive','hysteresis','stdJ','Gleason','negarc','feasible','stable']#'Vstd','Vcascade', 'stdJ','negdef','stable','Vpositive','eigdom_max']
 
     dico={'Vpositive':'Clements','bunincomp':'Phase parameter','hysteresis':'Multistability','negarc':'Gause','stdJ':'std(Jaccard)' }
     vals=[v for v in vals if v in df.keys()]
@@ -703,11 +719,11 @@ if __name__=='__main__':
     sysargv=['sym1']+list(sys.argv) #Command-line options,
 
     # DEFAULT OPTIONS
-    default={'resolution':5, # Resolution along x-axis in sampling triangle of interaction mean and sd
+    default={'resolution':11, # Resolution along x-axis in sampling triangle of interaction mean and sd
              'S':50, #Number of species
              'length':50,    # Number of positions along gradient
              'systems':(0,), #Replicas (list of labels e.g. ['a','b','c'] or range(3) for 3 replicas)
-             'init': 'hysteresis', # Initial conditions
+             'init': 'tworandom', # Initial conditions
                     # ('uniform' for the same everywhere, 'random' for random,
                     #  'follow' to follow an eq, 'hysteresis' to follow forward then backward)
              'keep_sys':1   # Keep same basic matrix throughout triangle for each replica (seems to give smoother visuals)
