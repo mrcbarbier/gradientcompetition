@@ -219,7 +219,7 @@ def make_point_measure(data,measure,**kwargs):
     g=data['growth']
     K=g/D
     measure['capa']=K
-    death=1#kwargs.get('death',10**-6)
+    death=kwargs.get('death',10**-6)
     alive=np.where(N>death)[0]
     Slive=len(alive)
     Alive=Aij[np.ix_(alive,alive)]
@@ -234,7 +234,10 @@ def make_point_measure(data,measure,**kwargs):
         Press=np.zeros(B.shape)
 
     measure['W']= g+ np.dot(Aij-np.diag(D),N)
-    eigJ=np.max(np.real(la.eigvals(J)))
+    if not np.sum(J.shape):
+        eigJ=0
+    else:
+        eigJ=np.max(np.real(la.eigvals(J)))
     measure['eigdom_J']=eigJ
     measure['eigdom_Jscaled']=eigJ/np.mean(Nlive)
     measure['eigdom']=np.max(np.real(la.eigvals(B)))
@@ -374,7 +377,7 @@ def make_measures(df,measure,**kwargs):
     measure['Gini']=np.sum( ( 2*rank - len(dNs)-1)*dNs )/len(dNs)/np.sum(dNs)
     measure['feasible']=np.mean(df['feasible'])
     measure['stable']=np.mean(df['eigdom_full']<0)
-    measure['Gleason']=measure['feasible'] * measure['stable']
+    measure['Gleason']=measure['feasible']# * measure['stable']
 
     Vpos=np.mean([np.mean(offdiag(np.array(x))>0) if len(x)>1 else 0 for x in df['Press'].values  ] )
     Vstd=np.mean([np.std(offdiag(np.array(x))) if len(x)>1 else 0 for x in df['Press'].values   ] )
@@ -472,6 +475,10 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
     for sys in systems:
         datarefs[sys]=make_data()
     vals=np.linspace(0,1,resolution)
+    if 'coords' in kwargs:
+        coords=kwargs['coords']
+    else:
+        coords=[(vals[x], vals[y]) for x in range(resolution) for y in range(x+1)    ]
 
     df =None# pd.DataFrame({'mean':[],'wid':[] })
     if not rerun and not remeasure:
@@ -479,74 +486,73 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
             df = pd.read_json(path + 'measures.csv')
         except:
             pass
+
     for sys in systems:
         print '   Sys', sys
-        for x in range(resolution):#[::-1]:
-            for y in range( x+1):
-                mn, wid = vals[x], vals[y]
-                if wid > 1 - mn + 10 ** -6 and not triangle == 'rectangle':
+        for mn, wid in coords:
+            if wid > 1 - mn + 10 ** -6 and not triangle == 'rectangle':
+                continue
+            if not rerun and not remeasure and not df is None and True in [np.allclose([mn, wid,sys], z) for z in
+                                                                           df[['mean', 'wid','sys']].values]:
+                continue
+            print 'MEAN {} WID {}'.format(mn, wid)
+            if keep_sys:
+                data=deepcopy(datarefs[sys])
+            else:
+                data=make_data()
+            for i in data:
+                if 'alpha' in i:
+                    mat=data[i]
+                    mat=mn+wid*(mat-.5)
+                    np.fill_diagonal(mat,0)
+                    data[i]=mat
+            dpath=path+Path('mn_{}-wd_{}-sys_{}'.format(mn,wid,sys) )
+            dpath.mkdir()
+            tdf=None
+            fname=dpath+'traj.csv'
+            al=data['alpha']
+            gamma=np.corrcoef(offdiag(al),offdiag(al.T))[0,1]
+            if np.isnan(gamma):
+                gamma=0
+            measure={'path':dpath, 'mean':mn,'wid':wid,'sym':gamma,
+                     'sys':sys,'rectangle':triangle=='rectangle'}
+            if not rerun:
+                try:
+                    tdf=pd.read_json(fname)
+                except Exception as e:
+                    pass
+            if tdf is None:
+                if remeasure:
                     continue
-                if not rerun and not remeasure and not df is None and True in [np.allclose([mn, wid,sys], z) for z in
-                                                                               df[['mean', 'wid','sys']].values]:
-                    continue
-                print 'MEAN {} WID {}'.format(mn, wid)
-                if keep_sys:
-                    data=deepcopy(datarefs[sys])
+                init=kwargs.get('init',None)
+                if init =='hysteresis':
+                    kw={}
+                    kw.update(kwargs)
+                    kw['init']='follow'
+                    tdf=make_run(data,mode=mode,ext_measure=measure,**kw)
+                    # kw['init']=tdf['Nf'].values[-1]+ np.random.uniform(0,1,S)
+                    tdf2=make_run(data,mode=mode,ext_measure=measure,reverse=1,**kw)
+                    tdf['reverse_Nf']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
+                elif  init =='tworandom':
+                    kw={}
+                    kw.update(kwargs)
+                    kw['init']='random'
+                    tdf=make_run(data,mode=mode,ext_measure=measure,**kw)
+                    tdf2=make_run(data,mode=mode,ext_measure=measure,reverse=1,**kw)
+                    tdf['reverse_Nf']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
                 else:
-                    data=make_data()
-                for i in data:
-                    if 'alpha' in i:
-                        mat=data[i]
-                        mat=mn+wid*(mat-.5)
-                        np.fill_diagonal(mat,0)
-                        data[i]=mat
-                dpath=path+Path('mn_{}-wd_{}-sys_{}'.format(mn,wid,sys) )
-                dpath.mkdir()
-                tdf=None
-                fname=dpath+'traj.csv'
-                al=data['alpha']
-                gamma=np.corrcoef(offdiag(al),offdiag(al.T))[0,1]
-                if np.isnan(gamma):
-                    gamma=0
-                measure={'path':dpath, 'mean':mn,'wid':wid,'sym':gamma,
-                         'sys':sys,'rectangle':triangle=='rectangle'}
-                if not rerun:
-                    try:
-                        tdf=pd.read_json(fname)
-                    except Exception as e:
-                        pass
-                if tdf is None:
-                    if remeasure:
-                        continue
-                    init=kwargs.get('init',None)
-                    if init =='hysteresis':
-                        kw={}
-                        kw.update(kwargs)
-                        kw['init']='follow'
-                        tdf=make_run(data,mode=mode,ext_measure=measure,**kw)
-                        # kw['init']=tdf['Nf'].values[-1]+ np.random.uniform(0,1,S)
-                        tdf2=make_run(data,mode=mode,ext_measure=measure,reverse=1,**kw)
-                        tdf['reverse_Nf']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
-                    elif  init =='tworandom':
-                        kw={}
-                        kw.update(kwargs)
-                        kw['init']='random'
-                        tdf=make_run(data,mode=mode,ext_measure=measure,**kw)
-                        tdf2=make_run(data,mode=mode,ext_measure=measure,reverse=1,**kw)
-                        tdf['reverse_Nf']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
-                    else:
-                        tdf=make_run(data,mode=mode,ext_measure=measure,**kwargs)
-                    tdf['mean']=mn
-                    tdf['wid']=wid
-                    tdf['sys']=sys
-                    tdf.to_json(fname)
+                    tdf=make_run(data,mode=mode,ext_measure=measure,**kwargs)
+                tdf['mean']=mn
+                tdf['wid']=wid
+                tdf['sys']=sys
+                tdf.to_json(fname)
 
-                # measure.update(m.export_params())
-                make_measures(tdf,measure)
-                if not df is None:
-                    df=pd.concat([df,pd.DataFrame([ measure ]) ],ignore_index=1)
-                else:
-                    df=pd.DataFrame([ measure ])
+            # measure.update(m.export_params())
+            make_measures(tdf,measure)
+            if not df is None:
+                df=pd.concat([df,pd.DataFrame([ measure ]) ],ignore_index=1)
+            else:
+                df=pd.DataFrame([ measure ])
     df.to_json(path+'measures.csv')
 
 
@@ -648,6 +654,7 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
     df['Vcascade']=np.clip(df['Vcascade'],0,1)
     df['Vcascade_max']=df['Vcascade_max']/(1+df['Vcascade_max'])
     df['Vstd']=np.clip(df['Vstd'],0,1)
+    df['bunincomp']=(df['bunincomp']<=0).astype('float')
     axes=['mean','wid']
     mode=kwargs.get('mode','dft')
     if mode =='full':
@@ -662,7 +669,7 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
               'bunin','bunincomp','bunincomp2',
               'hysteresis']
     else:
-        vals=['bunincomp','Vpositive','hysteresis','stdJ','Gleason','negarc','eqdist']#'Vstd','Vcascade', 'stdJ','negdef','stable','Vpositive','eigdom_max']
+        vals=['bunincomp','Vpositive','hysteresis','stdJ','Gleason','GleasonNK','negarc']#'Vstd','Vcascade', 'stdJ','negdef','stable','Vpositive','eigdom_max']
 
     dico={'Vpositive':'Clements','bunincomp':'Phase parameter','hysteresis':'Multistability','negarc':'Gause','stdJ':'std(Jaccard)' }
     vals=[v for v in vals if v in df.keys()]
@@ -670,23 +677,24 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
     rectangle=showdf['wid'].max()>.5
     for val in vals:
         plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize'])*(1,(1+rectangle)*.5)),plt.title(val)
-        if (np.min(showdf[val])<0 and np.max(showdf[val])>0) or 'eigdom' in val:
+        tab=showdf.pivot(columns='mean', index='wid', values=val)
+        if (np.min(tab)<0 and np.max(tab)>0) or 'eigdom' in val:
             vmax=np.max(np.abs(showdf[val]))
-            sns.heatmap(showdf.pivot(columns='mean', index='wid', values=val),vmax=vmax,vmin=-vmax, cmap='seismic_r')
+            sns.heatmap(tab,vmax=vmax,vmin=-vmax, cmap='seismic_r')
         else:
-            sns.heatmap(showdf.pivot(columns='mean', index='wid', values=val),cmap='PuRd')
+            sns.heatmap(tab,cmap='PuRd')
         plt.gca().invert_yaxis()
         plt.title(dico.get(val,val))
         plt.savefig(path+'{}.pdf'.format(val) )
     plt.figure(), plt.title('Criteria')
-    crits=[showdf.pivot(columns='mean', index='wid', values=val).values.T for val in ['Gleason','Vpositive','negarc']]
+    crits=[showdf.pivot(columns='mean', index='wid', values=val).values.T for val in ['GleasonNK','Vpositive','negarc']]
     crit=np.array([c/np.max(c[~np.isnan(c)] ) for c in crits]).T
     crit[np.isnan(crit)]=1
     plt.imshow(crit)
     plt.gca().invert_yaxis()
 
     plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize']) * (1.5, .5)), plt.title(val)
-    points=[(.1,.1), (.5,.25),(0.5,0.5),(.9,.1) ]
+    # points=[(.1,.1), (.5,.25),(0.5,0.5),(.9,.1) ]
     points=[(0.04,0.04), (.5,.25),(0.5,0.5),(.96,0.04), ]
     if rectangle:
         points+=[(.85,.6),(1,1)]
@@ -732,6 +740,7 @@ if __name__=='__main__':
           'rectangle':{'triangle':'rectangle'}, #Explore half rectangle
           'nokeep':{'keep_sys':0, 'systems':range(5)},  # Generate new properties at every point in the triangle
           'gauss':{'distribution':'normal'},
+          'points':{'coords':[(0.04,0.04), (.5,.25),(0.5,0.5),(.96,0.04), ], 'systems':range(100) }
           }
     for symm in [-1,0,1]:
         runs['sym{}'.format(symm) ]={'symm':symm,'resolution':51,'systems':range(15)}
