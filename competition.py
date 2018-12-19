@@ -11,66 +11,8 @@ from scipy.special import erf,binom
 
 #==================== BASICS ============================
 
-def erfmom(mom,mean,var,lim=0):
-    #Moment of error function
-    if var<=0.001:
-        var=0.001
-    xx=mean/sqrt(2*var)
-    mom0=.5 * (erf(xx)+1 )
-    mom1=sqrt(var/2/pi) * exp(-xx**2)
-    if mom==0:
-        return mom0
-    elif mom==1:
-        return mean* mom0 + mom1
-    elif mom==2:
-        return (var+mean**2)*mom0 + mean*mom1
-
-def bunin_solve(S=100,mu=1,sigma=1,sigma_k=1,gamma=1,tol=10**-5,**kwargs):
-    import scipy.optimize as sopt
-    u=(1-mu*1./S)
-    def calc_v(phi):
-        psg=np.clip(phi*sigma**2*gamma,None,u/2)
-        if psg<10**-6:
-            v=1./u
-        else:
-            v= (u-np.sqrt(u**2-4 *psg ))/(2*psg)
-        return v
-    def eqs(vec):
-        N1,N2=np.abs(vec[:2])  #N1, N2 must be positive
-        phi=np.exp(vec[2])/(1+np.exp(vec[2])) #phi must be between 0 and 1
-        v=calc_v(phi)
-        mean=1-v*mu*N1*phi
-        var=np.clip(v**2*(sigma_k**2+sigma**2*N2*phi),0.001,None)
-        m0,m1,m2=erfmom(0,mean,var),erfmom(1,mean,var),erfmom(2,mean,var)
-        eq1=(phi-m0)
-        eq2=(phi*N1-m1)
-        eq3=(phi*N2-m2)
-        res= np.array( (eq1,eq2,eq3))
-        return res
-    x0=kwargs.get('x0',np.random.random(3))
-    res= root(eqs,x0,tol=tol)  #ROOTFINDER
-    if not res.success:
-        #IF ROOT FINDING DOES NOT WORK (MAYBE DIVERGENCE, MAYBE BAD INITIAL CONDITION)
-        if sigma>.5 and mu>-1:
-            #IF LARGE SIGMA, GET INITIAL CONDITION FROM SLIGHTLY LOWER SIGMA
-            x0=bunin_solve(S=S,mu=mu,sigma=sigma/1.01,sigma_k=sigma_k,gamma=gamma,tol=tol)[:3]
-            res=root(eqs,x0,tol=tol)
-        else:
-            #ELSE, JUST TRY A FEW TIMES THEN QUIT
-            trials=50
-            while not res.success and trials>0:
-                x0=np.random.random(3)
-                res= root(eqs,x0,tol=tol)
-                trials-=1
-    N1, N2, phi = res.x
-    N1,N2=np.abs(N1),np.abs(N2)
-    phi=np.exp(phi)/(1+np.exp(phi))
-    if not res.success or N1>5:
-        return np.nan,np.nan,np.nan,np.nan
-    return N1,N2,phi, calc_v(phi)
-
-
 def offdiag(x):
+    '''Off-diagonal elements of a matrix.'''
     return x[np.eye(x.shape[0])==0]
 
 def ifelse(x,a,b):
@@ -78,17 +20,8 @@ def ifelse(x,a,b):
         return a
     return b
 
-def rotmat(S):
-    Nmi=np.random.random(S)
-    Nmi/=la.norm(Nmi)
-    rn = np.random.normal(0, 1, (S - 1, S - 1))
-    tmp = np.concatenate([np.atleast_2d(Nmi[1:]), rn])
-    AA = np.concatenate([np.atleast_2d(Nmi), tmp.T])
-    QQ = la.qr(AA)[0].T
-    QQ = QQ / np.sign(QQ[0, 0])
-    return QQ
-
 def setfigpath(path):
+    '''Set path for saving figures.'''
     import os
     import matplotlib as mpl
     mpl.rcParams["savefig.directory"] = os.path.dirname(path)
@@ -308,11 +241,12 @@ def make_run(data,tmax=20000,tsample=100,death=10**-6,mode='K',length=10,grange=
         if hasattr(init,'__iter__'):
             x0=init
         elif init == 'uniform':
-            x0 = np.ones(tol.shape) * 2  # + (np.random.random(tol.shape)-.5)*3.
+            x0 = np.ones(tol.shape) * 2
         elif 'follow' in init and not result is None:
             x0 = result+ np.random.uniform(0,1,S)
         else:
-            x0 = np.random.uniform(0,1,S) * np.max(Kmax) + 2  #/(1+capa)
+            x0 = np.exp(np.random.normal(0,1,S))# np.random.uniform(0,1,S)
+            x0= x0*np.max(Kmax)/np.max(x0) +1
 
         capa = np.clip(capa, 10 ** -9, None)
         locdata={}
@@ -362,7 +296,7 @@ def make_measures(df,measure,**kwargs):
     jacs = [1 - len(set(a1).intersection(a2)) * 1. / len(set(a1).union(a2)) for a1, a2 in zip(live[:-1], live[1:])]
     jacs = [len(set(a1).union(a2)) - len(set(a1).intersection(a2))  for a1, a2 in zip(live[:-1], live[1:])]
     jacs=np.array(jacs)*1./np.mean([len(a) for a in live])
-    dNs = [la.norm( (n1-n2)/(10**-15+n1+n2)) for n1, n2 in zip(Ns[:-1], Ns[1:])]
+    dNs = [la.norm( (n1-n2)) for n1, n2 in zip(Ns[:-1], Ns[1:])]
     if 0:
         changes=[ pos for pos, a1, a2 in zip(df['position'].values[:-1], live[:-1], live[1:]) for i in set(a1).symmetric_difference(a2)]
         xch=(np.array(changes,dtype='float')-df['position'].min())/(df['position'].max() - df['position'].min())
@@ -375,6 +309,7 @@ def make_measures(df,measure,**kwargs):
     measure['uniform']=np.std(dNs)/np.mean(np.array(dNs)+10**-15)
     rank=np.argsort(np.argsort(dNs))
     measure['Gini']=np.sum( ( 2*rank - len(dNs)-1)*dNs )/len(dNs)/np.sum(dNs)
+    # measure['Gini']=np.sum( 2*rank*dNs )/len(dNs)/np.sum(dNs)  - (1+1/len(dNs))
     measure['feasible']=np.mean(df['feasible'])
     measure['stable']=np.mean(df['eigdom_full']<0)
     measure['Gleason']=measure['feasible']# * measure['stable']
@@ -398,16 +333,8 @@ def make_measures(df,measure,**kwargs):
     V=np.mean([np.mean(np.diag(np.array(x))) for x in df['Press'].values  ] )
     gamma=measure['sym']
     measure['v']=V
-    if 'MF_Slive' in df and 0:
-        meanK = df['meanK'].mean()
-        if sigma>10**-5:
-            sigma=df['sigma'].mean()
-            N1,N2,phi,v= bunin_solve(S=S,mu=df['mu'].mean(),sigma=sigma,sigma_k=df['stdK'].mean()/meanK,gamma=gamma)
-        else:
-            v,phi=1./np.sqrt(u ),df['MF_Slive'].mean()/S
-    else:
-        phi=measure['alive']
-        v=2/(u +np.sqrt(u**2-4*gamma*sigma**2*phi) )
+    phi=measure['alive']
+    v=2/(u +np.sqrt(u**2-4*gamma*sigma**2*phi) )
     measure['v_from_phi']=v#
     def safelog(x):
         if x>0:
@@ -428,10 +355,12 @@ def make_measures(df,measure,**kwargs):
         measure[v+'_max']=df[v].max(skipna=1)
 
     measure.update( {'eqdist':df['eqdist'].max(), 'Jaccard':jacs,'Vpositive':Vpos,'Vstd': Vstd,'Vmax':Vmax,'Vdiagmax':Vdiagmax,'Vdiagmin':Vdiagmin,'Vdiagstd':Vdiagstd })
-    if 'reverse_Nf' in df:
-        x1,x2=df['Nf'],df['reverse_Nf']
-        x1,x2=np.array(list(x1.values)),np.array(list(x2.values))
-        measure['hysteresis']=np.sum( 2*np.abs(x1-x2 )/ (x1+x2+1)  )
+    if 'Nf_1' in df:
+        Nfs=[k for k in df if k=='Nf' or 'Nf_' in k]
+        xs=np.array([[list(x) for x in df[n].values] for n in Nfs])
+        # x1,x2=df['Nf'],df['Nf_1']
+        # x1,x2=np.array(list(x1.values)),np.array(list(x2.values))
+        measure['hysteresis']= np.mean(np.std(xs,axis=0)/(1+np.mean(xs,axis=0)))
     else:
         measure['hysteresis']=0
 
@@ -532,20 +461,24 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
                     tdf=make_run(data,mode=mode,ext_measure=measure,**kw)
                     # kw['init']=tdf['Nf'].values[-1]+ np.random.uniform(0,1,S)
                     tdf2=make_run(data,mode=mode,ext_measure=measure,reverse=1,**kw)
-                    tdf['reverse_Nf']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
-                elif  init =='tworandom':
+                    tdf['Nf_1']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
+                elif 'rnd' in init:
+                    ninit=int(init.replace('rnd',''))
                     kw={}
                     kw.update(kwargs)
                     kw['init']='random'
                     tdf=make_run(data,mode=mode,ext_measure=measure,**kw)
-                    tdf2=make_run(data,mode=mode,ext_measure=measure,reverse=1,**kw)
-                    tdf['reverse_Nf']=tdf2['Nf'].values[np.argsort(tdf2['position'].values )]
+                    for i in range(1,ninit):
+                        print '   Initial condition',i+1,'/',ninit
+                        tdf2 = make_run(data, mode=mode, ext_measure=measure, **kw)
+                        tdf['Nf_{}'.format(i)] = tdf2['Nf'].values[np.argsort(tdf2['position'].values)]
                 else:
                     tdf=make_run(data,mode=mode,ext_measure=measure,**kwargs)
                 tdf['mean']=mn
                 tdf['wid']=wid
                 tdf['sys']=sys
                 tdf.to_json(fname)
+                pd.Series(data).to_json(dpath + 'data.csv')
 
             # measure.update(m.export_params())
             make_measures(tdf,measure)
@@ -558,36 +491,40 @@ def loop(path='gradcomp',rerun=1,remeasure=0,resolution=11,S=30,gfull=(0,300),tr
 
 
 
-def local_plots(df,measure,fpath='',**kwargs):
+def local_plots(df,fpath='',**kwargs):
     path=Path(fpath)
     profiles=[np.array(list(df['Nf'].values)).T]
-    if 'reverse_Nf' in df:
-        profiles.append(np.array(list(df['reverse_Nf'].values)).T)
+    if 'Nf_1' in df:
+        for k in df:
+            if 'Nf_' in k:
+                profiles.append(np.array(list(df[k].values)).T)
         hyster=1
     else:
         hyster=0
     ii=0
-    plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize'])*(len(profiles)+hyster,1))
+    plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize'])*(len(profiles),1))
     S = len(profiles[0])
-    vec=np.random.random(S)
     for profile in profiles:
         ii+=1
         if len(profiles)>1:
-            plt.subplot(1,len(profiles)+hyster,ii)
+            plt.subplot(1,len(profiles),ii)
         pos = df['position']
         for y in profile:
             x,y=np.sort(pos),y[np.argsort(pos)]
             plt.plot(x,y)
             plt.fill_between(x, y, 0,alpha=.1)
-        if hyster:
-            plt.subplot(1,len(profiles)+1,len(profiles)+1)
-            y=np.dot(vec,profile)
-            x, y = np.sort(pos), y[np.argsort(pos)]
-            plt.plot(x,y)
     plt.suptitle(kwargs.get('title','Mn {} Wd {}'.format(df['mean'].mean(),df['wid'].mean()) ))
     if kwargs.get('save',1):
         plt.savefig(path + kwargs.get('fname', 'profile') +kwargs.get('format','.png') )
         plt.close()
+    if hyster:
+        plt.figure()
+        vec = np.random.random(S) + 1
+        for profile in profiles:
+            y=np.dot(vec,profile)
+            x, y = np.sort(pos), y[np.argsort(pos)]
+            plt.scatter(x,y,c='k')
+        plt.savefig(path + kwargs.get('fname', 'profile')+'_CSI' +kwargs.get('format','.png') )
 
 
 def detailed_plots( path,df=None,**kwargs):
@@ -604,11 +541,11 @@ def detailed_plots( path,df=None,**kwargs):
         tdf=pd.read_json(Path(dpath)+'traj.csv')
         kw={}
         kw.update(kwargs)
-        fpath=kw.pop('fpath',dpath)
         fname = kw.pop('fname', 'profile')
         if 'fpath' in kwargs:
-            fname=fname + '_{}'.format(idx)
-        figs.append(local_plots(tdf, measure, fpath=fpath,fname=fname ,**kw))
+            fname=fname + '_{}'.format(measure['sys'])
+        fpath=kw.pop('fpath',dpath)
+        figs.append(local_plots(tdf, fpath=fpath,fname=fname ,**kw))
     return figs
 
 def show(path='gradcomp',detailed=0,hold=0,**kwargs):
@@ -620,6 +557,9 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
     df=pd.read_json(path + 'measures.csv')
     if kwargs.get('triangle',0):
         df=df[df['wid']<=1-df['mean']]
+    rectangle = df['wid'].max() > .5
+    if not rectangle:
+        df = df[(df['mean'] > 0) & (df['mean'] < 1)]  # Remove endpoints where things are weird
     df['J=1']= [np.mean(x==1) for x in [np.array(z) for z in  df['Jaccard'].values]]
     df['meanJ']= [np.mean(x[x>0]) for x in [np.array(z) for z in  df['Jaccard'].values]]
     df['stdJ']= [np.std(x) for x in [np.array(z) for z in  df['Jaccard'].values]]
@@ -669,20 +609,19 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
               'bunin','bunincomp','bunincomp2',
               'hysteresis']
     else:
-        vals=['bunincomp','Vpositive','hysteresis','stdJ','Gleason','GleasonNK','negarc']#'Vstd','Vcascade', 'stdJ','negdef','stable','Vpositive','eigdom_max']
+        vals=['bunincomp','Vpositive','hysteresis','stdJ','Gleason','GleasonNK','negarc','Gini']#'Vstd','Vcascade', 'stdJ','negdef','stable','Vpositive','eigdom_max']
 
     dico={'Vpositive':'Clements','bunincomp':'Phase parameter','hysteresis':'Multistability','negarc':'Gause','stdJ':'std(Jaccard)' }
     vals=[v for v in vals if v in df.keys()]
     showdf=df[axes+vals].groupby(axes).mean().reset_index()
-    rectangle=showdf['wid'].max()>.5
     for val in vals:
         plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize'])*(1,(1+rectangle)*.5)),plt.title(val)
         tab=showdf.pivot(columns='mean', index='wid', values=val)
-        if (np.min(tab)<0 and np.max(tab)>0) or 'eigdom' in val:
+        if (np.min(tab.values)<0 and np.max(tab.values)>0) or 'eigdom' in val:
             vmax=np.max(np.abs(showdf[val]))
             sns.heatmap(tab,vmax=vmax,vmin=-vmax, cmap='seismic_r')
         else:
-            sns.heatmap(tab,cmap='PuRd')
+            sns.heatmap(tab,cmap='OrRd')
         plt.gca().invert_yaxis()
         plt.title(dico.get(val,val))
         plt.savefig(path+'{}.pdf'.format(val) )
@@ -692,6 +631,7 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
     crit[np.isnan(crit)]=1
     plt.imshow(crit)
     plt.gca().invert_yaxis()
+    plt.savefig(path+'criteria.pdf')
 
     plt.figure(figsize=np.array(mpfig.rcParams['figure.figsize']) * (1.5, .5)), plt.title(val)
     # points=[(.1,.1), (.5,.25),(0.5,0.5),(.9,.1) ]
@@ -706,21 +646,28 @@ def show(path='gradcomp',detailed=0,hold=0,**kwargs):
         pdf=df[(df['mean']==closest[0]) & (df['wid']==closest[1])]
         Js=np.concatenate(pdf['Jaccard'].values)
         plt.hist(Js,bins=np.linspace(0,1,10)),plt.title('Mn {} Wd {}'.format(*closest) )
+        plt.yscale('log')
     plt.savefig(path+'hist.pdf'.format(*closest))
 
+    done=[]
     for ip, p in enumerate(points):
         mw=df[['mean','wid']].values
         closest=mw[np.argmin([la.norm(v-p) for v in mw] )]
+        if tuple(closest) in done:
+            continue
+        done.append(tuple(closest))
         print closest
         pdf=df[(df['mean']==closest[0]) & (df['wid']==closest[1]) ] # &(df['sys']==0)
-        detailed_plots(path, df=pdf,save=1,fpath=path,title='Mn {} Wd {}'.format(*closest),fname='Mn_{}_Wd_{}'.format(*closest),format='.pdf' )
+        pdf=pdf[pdf['hysteresis']>=.6*np.max(pdf['hysteresis']) ]
+        detailed_plots(path, df=pdf,save=1,fpath=path,format='.pdf',fname='Mn_{}_Wd_{}'.format(*closest), **kwargs)
+
     if not hold:
         plt.show()
 
 if __name__=='__main__':
     #NOTES:
 
-    sysargv=['sym1']+list(sys.argv) #Command-line options,
+    sysargv=['points']+list(sys.argv) #Command-line options,
 
     # DEFAULT OPTIONS
     default={'resolution':11, # Resolution along x-axis in sampling triangle of interaction mean and sd
@@ -731,6 +678,7 @@ if __name__=='__main__':
              'init': 'hysteresis', # Initial conditions
                     # ('uniform' for the same everywhere, 'random' for random,
                     #  'follow' to follow an eq, 'hysteresis' to follow forward then backward)
+                    # 'rndX' to run X times with different random initial conditions each time
              'keep_sys':1   # Keep same basic matrix throughout triangle for each replica (seems to give smoother visuals)
              }
 
@@ -740,10 +688,11 @@ if __name__=='__main__':
           'rectangle':{'triangle':'rectangle'}, #Explore half rectangle
           'nokeep':{'keep_sys':0, 'systems':range(5)},  # Generate new properties at every point in the triangle
           'gauss':{'distribution':'normal'},
-          'points':{'coords':[(0.04,0.04), (.5,.25),(0.5,0.5),(.96,0.04), ], 'systems':range(100) }
+          'points':{'coords':[(0.04,0.04), (.5,.25),(0.5,0.5),(.96,0.04), ], 'systems':range(100) },
+          'csi':{'coords':[(0.5,.5)],'init':'rnd20','systems':range(40),'tmax':20000,'tsample':1000}
           }
     for symm in [-1,0,1]:
-        runs['sym{}'.format(symm) ]={'symm':symm,'resolution':51,'systems':range(15)}
+        runs['sym{}'.format(symm) ]={'symm':symm,'resolution':51,'systems':range(1),'tmax':50000}
 
     run =None
     for i in sysargv:
@@ -761,7 +710,7 @@ if __name__=='__main__':
         else:
             options.update(runs[run])
         path='gradcomp_'+run.replace('+','_')
-        if not 'show' in sysargv:
+        if 'rerun' in sysargv or 'measure' in sysargv:
             loop(path=path, rerun='rerun' in sysargv, remeasure='measure' in sysargv,**options)
         if 'detailed' in sysargv:
             detailed_plots(path, save=1)#,filter='mean==.5 & wid==.5')
